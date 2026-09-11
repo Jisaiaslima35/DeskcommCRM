@@ -418,9 +418,18 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
     // em v6 e v7 (smoke prova que o cacheControl continua virando cache_control).
     result = await generateText({
       // `decisao.baseUrl` só é preenchido quando o painel apontou um endpoint
-      // (gateway OpenAI-compatível, ou modelo local). Providers canônicos
-      // ignoram o terceiro argumento e vão ao endpoint intrínseco.
-      model: factory(config.apiKey, model, decisao.baseUrl ?? undefined),
+      // via binding do ponto (gateway OpenAI-compatível, ou modelo local).
+      // `config.baseUrl` é o fallback da credencial — quando o agente publicado
+      // é o ponto, o resolver não tem onde buscar (devolve null), e o
+      // endpoint só pode vir de `ai_provider_credentials.base_url`, carregado
+      // pela `resolveOrgLlmConfig`. Sem o `?? config.baseUrl`, um agente
+      // `openai_compat` quebra em TODO ponto auxiliar (`stage_classifier`,
+      // `intent_router`, …) mesmo com a credencial válida e o 9router
+      // respondendo — a fábrica rejeita undefined e o turno morre.
+      //
+      // Providers canônicos ignoram o terceiro argumento e vão ao endpoint
+      // intrínseco de terem sido escolhidos.
+      model: factory(config.apiKey, model, decisao.baseUrl ?? config.baseUrl ?? undefined),
       system: prefix.system,
       messages: input.messages,
       tools: guardServiceTools(prefix.tools),

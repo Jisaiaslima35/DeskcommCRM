@@ -150,6 +150,28 @@ export interface OrgLlmConfig {
    * ABERTO na informação de falhar em silêncio.
    */
   orcamentoIndisponivelPorque: string | null;
+  /**
+   * Endpoint custom do provedor. Vem de `ai_provider_credentials.base_url` na
+   * MESMA query que busca a chave. Faz a ponte que faltava entre
+   * `ai_provider_credentials` (fonte canônica do endpoint do gateway
+   * OpenAI-compat) e a fábrica de `createDefaultRegistry`:
+   *
+   *  - O resolver (`decidirBinding`) só sabe carregar este valor quando o
+   *    ponto é exatamente o que tem binding (`purpose=` casa); pra pontos
+   *    AUXILIARES (ex.: `stage_classifier`, `intent_router`) que herdam do
+   *    agente publicado, o ramo do resolver devolve `baseUrl: null` por
+   *    construção — não tem onde buscar.
+   *  - Aqui, lendo a credencial JUNTAMENTE com a chave, devolvemos o
+   *    endpoint como parte da config da org. O seam usa como fallback quando
+   *    `decisao.baseUrl` é null: primeiro a escolha explícita do painel de
+   *    pontos (se houver binding), depois o endpoint da credencial (sempre
+   *    que ela tiver `openai_compat`).
+   *
+   * Sem isso o worker quebra em `openai_compat requer baseUrl` no PRIMEIRO
+   * ponto auxiliar, mesmo com a credencial válida e o 9router respondendo —
+   * o gateway fala, mas ninguém ouviu porque a chamada nem saiu.
+   */
+  baseUrl: string | null;
 }
 
 // Leitura DEFENSIVA de organizations.settings->'llm' (jsonb livre): campo com
@@ -299,8 +321,9 @@ export async function resolveOrgLlmConfig(
         api_key_encrypted: unknown;
         api_key_iv: unknown;
         api_key_tag: unknown;
+        base_url: string | null;
       }>(
-        `select api_key_encrypted, api_key_iv, api_key_tag
+        `select api_key_encrypted, api_key_iv, api_key_tag, base_url
          from ai_provider_credentials
          where organization_id = $1 and id = $2
            and is_active and validated_at is not null
@@ -311,8 +334,9 @@ export async function resolveOrgLlmConfig(
         api_key_encrypted: unknown;
         api_key_iv: unknown;
         api_key_tag: unknown;
+        base_url: string | null;
       }>(
-        `select api_key_encrypted, api_key_iv, api_key_tag
+        `select api_key_encrypted, api_key_iv, api_key_tag, base_url
          from ai_provider_credentials
          where organization_id = $1 and provider = $2
            and is_active and validated_at is not null
@@ -322,6 +346,7 @@ export async function resolveOrgLlmConfig(
       );
 
   let apiKey: string;
+  let baseUrl: string | null = null;
   const cred = credRows[0];
   if (cred !== undefined) {
     apiKey = decryptKey({
@@ -329,6 +354,7 @@ export async function resolveOrgLlmConfig(
       iv: byteaToBuffer(cred.api_key_iv),
       tag: byteaToBuffer(cred.api_key_tag),
     });
+    baseUrl = cred.base_url ?? null;
   } else if (provider === 'anthropic' && cfg.anthropicApiKey) {
     apiKey = cfg.anthropicApiKey;
   } else if (provider === 'openai' && cfg.openaiApiKey) {
@@ -347,5 +373,6 @@ export async function resolveOrgLlmConfig(
     enabledModels: settings.enabled_models,
     orcamento,
     orcamentoIndisponivelPorque,
+    baseUrl,
   };
 }

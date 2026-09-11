@@ -66,6 +66,7 @@ vi.mock("@/lib/agent-engine/edge/llm/credentials", () => ({
     enabledModels: [],
     orcamento: { modo: "off", tetoCents: 0, efetivoEm: null, limiarPct: 80 },
     orcamentoIndisponivelPorque: null,
+    baseUrl: null,
   })),
 }));
 
