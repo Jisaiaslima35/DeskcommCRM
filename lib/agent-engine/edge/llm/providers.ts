@@ -136,7 +136,7 @@ export function createDefaultRegistry(opts?: { allowedHosts?: string[] }): Provi
         apiKey,
         baseURL: baseUrl,
         fetch: contain(baseUrl),
-      })(modelId);
+      }).chat(modelId);
     },
   };
 }
