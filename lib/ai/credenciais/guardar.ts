@@ -43,6 +43,13 @@ export interface PedidoDeGuardar {
   label: string;
   /** Plaintext. Vive só no escopo desta chamada — nunca persistido nem logado. */
   apiKey: string;
+  /**
+   * Endpoint do gateway OpenAI-compat. Obrigatório quando `provider ===
+   * "openai_compat"` — sem ele o validator não consegue pingar e a chamada
+   * real depois quebra com `LlmProviderMissingBaseUrl`. Para os 4 provedores
+   * canônicos fica em `null`.
+   */
+  baseUrl?: string | null;
   requestId?: string;
 }
 
@@ -65,6 +72,10 @@ export async function guardarCredencial(p: PedidoDeGuardar): Promise<ResultadoDe
       api_key_iv: bufToBytea(encrypted.iv),
       api_key_tag: bufToBytea(encrypted.tag),
       api_key_last4: encrypted.last4,
+      // `base_url` só é relevante pra `openai_compat`; pros 4 canônicos fica
+      // NULL (a migration 0231 aceita NULL sem default). Persistir mesmo nos
+      // outros custa nada e simplifica o revalidate (não precisa filtrar).
+      base_url: p.baseUrl ?? null,
       is_active: true,
       created_by: p.userId,
     })
@@ -92,7 +103,7 @@ export async function guardarCredencial(p: PedidoDeGuardar): Promise<ResultadoDe
   // espera uma ida ao provedor. Guardar a chave e validá-la são coisas
   // diferentes — a segunda pode falhar por rede sem que a primeira precise ser
   // desfeita.
-  void validarEmSegundoPlano(p.admin, id, p.orgId, p.provider, p.apiKey);
+  void validarEmSegundoPlano(p.admin, id, p.orgId, p.provider, p.apiKey, p.baseUrl);
 
   return { ok: true, id, last4: encrypted.last4 };
 }
@@ -103,9 +114,10 @@ async function validarEmSegundoPlano(
   organizationId: string,
   provider: Provider,
   apiKey: string,
+  baseUrl?: string | null,
 ): Promise<void> {
   try {
-    const r = await validateProviderKey(provider, apiKey);
+    const r = await validateProviderKey(provider, apiKey, baseUrl ?? undefined);
     await admin
       .from("ai_provider_credentials")
       .update(

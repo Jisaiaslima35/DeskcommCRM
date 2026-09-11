@@ -83,6 +83,16 @@ export const PROVEDORES = [
     ondePegarAChave: "https://openrouter.ai/keys",
     prefixoDaChave: "sk-or-…",
   },
+  {
+    id: "openai_compat",
+    rotulo: "OpenAI-compatível (gateway)",
+    quandoUsar:
+      "Gateway próprio que fala a API da OpenAI: 9Router, LiteLLM, vLLM, Ollama com servidor, proxy corporativo. Exige apontar o endpoint (campo Base URL) — sem ele o agente não tem pra onde mandar a chamada.",
+    aceitaEndpointProprio: true,
+    catalogoSincronizavel: true,
+    ondePegarAChave: "https://9router.automacaojs.us/dashboard (ou o dashboard do seu gateway)",
+    prefixoDaChave: "sk-…",
+  },
 ] as const satisfies readonly ProvedorSuportado[];
 // `as const satisfies` e não anotação de tipo: a anotação apagaria os literais
 // e `Provider` viraria `string`, deixando o compilador aceitar qualquer texto

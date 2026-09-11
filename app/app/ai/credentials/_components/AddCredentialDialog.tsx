@@ -41,6 +41,9 @@ const formSchema = z.object({
   provider: z.enum(IDS_DE_PROVEDOR),
   label: z.string().trim().min(1, "Obrigatório").max(80),
   api_key: z.string().trim().min(8, "API key muito curta").max(2048),
+  // Endpoint do gateway OpenAI-compat. Refinado no submit (precisa começar
+  // com http/https E ser obrigatório quando provider === "openai_compat").
+  base_url: z.string().trim().max(2048).optional().or(z.literal("")),
 });
 
 type FormValues = z.infer<typeof formSchema>;
@@ -61,6 +64,7 @@ export function AddCredentialDialog({ open, onOpenChange }: Props) {
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [label, setLabel] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<keyof FormValues, string>>>({});
   const provedor = PROVEDORES.find((p) => p.id === provider) ?? PROVEDORES[0];
@@ -69,6 +73,7 @@ export function AddCredentialDialog({ open, onOpenChange }: Props) {
     setProvider("anthropic");
     setLabel("");
     setApiKey("");
+    setBaseUrl("");
     setErrors({});
   };
 
@@ -76,13 +81,38 @@ export function AddCredentialDialog({ open, onOpenChange }: Props) {
     e.preventDefault();
     setErrors({});
 
-    const parsed = formSchema.safeParse({ provider, label, api_key: apiKey });
+    // openai_compat precisa de base_url: Zod não sabe disso, então conferimos
+    // aqui antes de submeter (a rota também recusa, mas a mensagem em PT-BR
+    // direto no campo é melhor que o 422 genérico).
+    const requireBaseUrl =
+      PROVEDORES.find((p) => p.id === provider)?.aceitaEndpointProprio === true &&
+      provider !== "openrouter" &&
+      provider !== "openai";
+
+    if (requireBaseUrl && !baseUrl.trim()) {
+      setErrors({
+        base_url: t("Para este provedor informe a Base URL do gateway (ex: https://9router.automacaojs.us/v1)."),
+      });
+      return;
+    }
+    if (baseUrl.trim() && !/^https?:\/\//i.test(baseUrl.trim())) {
+      setErrors({ base_url: t("Base URL precisa começar com http:// ou https://.") });
+      return;
+    }
+
+    const parsed = formSchema.safeParse({
+      provider,
+      label,
+      api_key: apiKey,
+      base_url: baseUrl,
+    });
     if (!parsed.success) {
       const flat = parsed.error.flatten().fieldErrors;
       setErrors({
         provider: flat.provider?.[0] ? t(flat.provider[0]) : undefined,
         label: flat.label?.[0] ? t(flat.label[0]) : undefined,
         api_key: flat.api_key?.[0] ? t(flat.api_key[0]) : undefined,
+        base_url: flat.base_url?.[0] ? t(flat.base_url[0]) : undefined,
       });
       return;
     }
@@ -92,7 +122,11 @@ export function AddCredentialDialog({ open, onOpenChange }: Props) {
     try {
       const res = await apiClient.post<CreateResponse>(
         "/api/v1/ai/credentials",
-        parsed.data,
+        {
+          ...parsed.data,
+          // envia só quando preenchido; rota aceita null/undefined pros outros
+          ...(baseUrl.trim() ? { base_url: baseUrl.trim() } : {}),
+        },
       );
       toast.dismiss(validatingToast);
       toast.success(t("Credencial salva. Validação em segundo plano."));
@@ -202,6 +236,35 @@ export function AddCredentialDialog({ open, onOpenChange }: Props) {
               <p className="text-xs text-destructive">{errors.api_key}</p>
             )}
           </div>
+
+          {provedor.aceitaEndpointProprio ? (
+            <div className="space-y-2">
+              <Label htmlFor="cred-base-url">{t("Base URL do gateway")}</Label>
+              <Input
+                id="cred-base-url"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder={
+                  provider === "openai_compat"
+                    ? "https://9router.automacaojs.us/v1"
+                    : provider === "openrouter"
+                      ? "https://openrouter.ai/api/v1"
+                      : "https://api.openai.com/v1"
+                }
+                autoComplete="off"
+                inputMode="url"
+                maxLength={2048}
+              />
+              <p className="text-xs text-muted-foreground">
+                {provider === "openai_compat"
+                  ? t("Endpoint completo do gateway OpenAI-compat (termina em /v1).")
+                  : t("Opcional — deixe vazio pra usar o endpoint canônico do provedor.")}
+              </p>
+              {errors.base_url && (
+                <p className="text-xs text-destructive">{errors.base_url}</p>
+              )}
+            </div>
+          ) : null}
 
           <DialogFooter>
             <Button

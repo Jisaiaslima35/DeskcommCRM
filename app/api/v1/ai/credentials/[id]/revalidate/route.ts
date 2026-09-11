@@ -44,7 +44,7 @@ export async function POST(
   const { data: row, error: fetchErr } = await admin
     .from("ai_provider_credentials")
     .select(
-      "id, organization_id, provider, label, api_key_encrypted, api_key_iv, api_key_tag, is_active",
+      "id, organization_id, provider, label, api_key_encrypted, api_key_iv, api_key_tag, is_active, base_url",
     )
     .eq("id", id)
     .maybeSingle();
@@ -73,7 +73,7 @@ export async function POST(
     return fail("decrypt_failed", t("Falha ao decifrar credential."), 500, { requestId });
   }
 
-  const result = await validateProviderKey(row.provider, apiKey);
+  const result = await validateProviderKey(row.provider, apiKey, row.base_url ?? undefined);
   const patch = result.ok
     ? {
         validated_at: new Date().toISOString(),

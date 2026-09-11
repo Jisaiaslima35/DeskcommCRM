@@ -23279,3 +23279,228 @@ grant execute on function public.fn_decrypt_oauth(bytea) to service_role;
 grant execute on function public.fn_encrypt_oauth(text) to service_role;
 grant execute on function public.fn_lgpd_cascade_redact_contact(uuid, uuid, uuid) to service_role;
 grant execute on function public.fn_update_budget_consumption() to service_role;
+
+-- ---- openai_compat: 5o provider LLM (migration openai-compat-credential) ----
+-- A migration foi timestampada 20260910233521_0231_openai_compat_credential_base_url.sql
+-- (o número 0231 coincidiu com uma anterior; o apêndice do baseline é identificado
+-- pelo título, não pelo número). Adiciona `base_url` à credencial pra o validator
+-- de openai_compat ter onde bater e atualiza a view segura pra UI mostrar o valor.
+alter table public.ai_provider_credentials
+  add column if not exists base_url text;
+
+comment on column public.ai_provider_credentials.base_url is
+  'Migration openai_compat_credential: endpoint do gateway OpenAI-compat usado pra validar e chamar a chave. '
+  'NULL pros 4 provedores canônicos (endpoint intrínseco do provider). Obrigatório quando '
+  'provider = ''openai_compat'' — a rota POST recusa com 422 sem ele.';
+
+create or replace view public.ai_provider_credentials_safe
+  with (security_invoker = true) as
+  select
+    id,
+    organization_id,
+    provider,
+    label,
+    api_key_last4,
+    validated_at,
+    validation_error,
+    models_available,
+    is_active,
+    created_by,
+    created_at,
+    updated_at,
+    base_url
+  from public.ai_provider_credentials;
+
+grant select on public.ai_provider_credentials_safe to authenticated;
+
+-- ---- waha_session_name_curto (migration 0232) ----
+-- A função fn_reserve_channel_connection (migration 0228) gerava nomes de 69
+-- chars (org_<32>_<32>) mas o WAHA rejeita nomes > 54 chars em POST /api/sessions
+-- com 400 Bad Request. Toda reserva terminava em connection_repair_required (502
+-- ao cliente) sem chegar a criar a sessão remota.
+-- Forward-fix: nova fórmula org_<32>_<16> = 53 chars (1 abaixo do teto WAHA, com
+-- folga). Mantém org_id inteiro (identifica 100% o tenant) e usa 64 bits do random
+-- como desempate local.
+create or replace function public.fn_reserve_channel_connection(
+  p_org uuid,
+  p_key uuid,
+  p_hash text,
+  p_display_name text default null,
+  p_onboarding boolean default false
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path to 'public'
+as $function$
+declare receipt public.channel_connection_requests; channel public.channel_sessions; token uuid:=gen_random_uuid();
+begin
+ if auth.uid() is null or not public.fn_role_at_least(p_org,'admin') or not public.fn_support_write_allowed(p_org)
+ then raise exception 'connection_forbidden' using errcode='42501';end if;
+ if not public.fn_session_mfa_proven() then raise exception 'connection_mfa_required' using errcode='42501';end if;
+ if p_key is null or p_hash is null or length(p_hash)<>64 or length(coalesce(p_display_name,''))>100 then
+  raise exception 'connection_invalid_request' using errcode='22023';end if;
+ perform pg_advisory_xact_lock(hashtextextended(p_org::text,2281));
+ delete from public.channel_connection_requests where organization_id=p_org and idempotency_key=p_key
+  and state='succeeded' and updated_at<now()-interval '24 hours';
+ select * into receipt from public.channel_connection_requests where organization_id=p_org and idempotency_key=p_key for update;
+ if found then
+  if receipt.request_hash<>p_hash then raise exception 'idempotency_conflict' using errcode='22023';end if;
+  if receipt.state='succeeded' then
+   select * into channel from public.channel_sessions where organization_id=p_org and id=receipt.channel_session_id;
+   return jsonb_build_object('replay',true,'channel',to_jsonb(channel),'receipt_id',receipt.id);
+  end if;
+  if receipt.state='processing' and receipt.lease_until>now() then
+   raise exception 'connection_in_progress' using errcode='55P03';end if;
+  select * into channel from public.channel_sessions where organization_id=p_org and id=receipt.channel_session_id for update;
+  if not found then raise exception 'connection_reservation_missing' using errcode='P0002';end if;
+ else
+  if p_onboarding then
+   select * into channel from public.channel_sessions where organization_id=p_org and provider='waha'
+    and (metadata->>'onboarding'='true' or waha_session_name='org_'||left(p_org::text,8))
+    order by created_at limit 1 for update;
+  end if;
+  if channel.id is null then
+   -- Migration 0232: nome curto (≤ 54 chars) que cabe no WAHA. 4 + 32 + 1 + 16 = 53.
+   insert into public.channel_sessions(organization_id,waha_session_name,display_name,engine,webhook_path_token,
+     webhook_secret_encrypted,status,last_status_change_at,consecutive_health_fails,daily_message_limit,metadata)
+   values(p_org,
+     'org_'||replace(p_org::text,'-','')||'_'||substr(replace(gen_random_uuid()::text,'-',''),1,16),
+     p_display_name,'NOWEB',
+     replace(gen_random_uuid()::text,'-',''),'\x00'::bytea,'STARTING',now(),0,250,
+     '{"ai_gate":"allowlist","ai_gate_mode":"pre_go_live","ai_test_phone_numbers":[]}'::jsonb
+     || case when p_onboarding then '{"onboarding":true}'::jsonb else '{}'::jsonb end) returning * into channel;
+  end if;
+  if exists(select 1 from public.channel_connection_requests where organization_id=p_org and channel_session_id=channel.id
+   and (state='processing' and lease_until>now())) then raise exception 'connection_in_progress' using errcode='55P03';end if;
+  insert into public.channel_connection_requests(organization_id,idempotency_key,request_hash,channel_session_id)
+   values(p_org,p_key,p_hash,channel.id) returning * into receipt;
+ end if;
+ if exists(select 1 from public.channel_connection_requests where organization_id=p_org and channel_session_id=channel.id
+  and id<>receipt.id and (state='processing' and lease_until>now())) then raise exception 'connection_in_progress' using errcode='55P03';end if;
+ update public.channel_connection_requests set state='processing',lease_token=token,lease_until=now()+interval '5 minutes',
+  remote_created=false,updated_at=now() where organization_id=p_org and id=receipt.id;
+ update public.channel_sessions set status='STARTING',status_reason='connection_pending',last_status_change_at=now()
+  where organization_id=p_org and id=channel.id returning * into channel;
+ return jsonb_build_object('replay',false,'channel',to_jsonb(channel),'receipt_id',receipt.id,'lease_token',token);
+end;
+$function$;
+
+-- Backfill idempotente: encurta nomes > 54 chars (não toca em linhas já curtas).
+update public.channel_sessions
+   set waha_session_name = 'org_' || substr(replace(waha_session_name, 'org_', ''), 1, 32) || '_' || substr(replace(waha_session_name, 'org_', ''), 34, 16),
+       updated_at = now()
+ where waha_session_name like 'org_%_%'
+   and length(waha_session_name) > 54;
+
+-- CHECK de proteção contra regressão futura (o WAHA rejeita > 54 chars).
+alter table public.channel_sessions
+  drop constraint if exists channel_sessions_waha_name_length_check;
+alter table public.channel_sessions
+  add constraint channel_sessions_waha_name_length_check
+  check (waha_session_name is null or length(waha_session_name) <= 54);
+
+-- ============================================================================
+-- ---- openai_compat models and data fix (migration 0233) ----
+-- ============================================================================
+-- Catálogo `ai_models` ganha o 5º provedor (openai_compat) + fix de dados do
+-- tenant `dr-matheus-dore`: ai_models estava vazio pra esse provider (UI
+-- dropdown lia de lá, não de credential.models_available), credencial
+-- 9router-prod tinha base_url NULL apesar do binding válido, e o agente
+-- `Atendimento Inicial` (versão 6955c3e2) estava repontado pra sessão
+-- arquivada 881084e0 (que ia recusar roteamento do agent_engine).
+--
+-- Idempotente: ON CONFLICT DO UPDATE (modelos), UPDATE WHERE base_url IS NULL
+-- (credencial), UPDATE WHERE ID + origin ID + org match (repointing com bypass
+-- de trigger de imutabilidade via SET LOCAL session_replication_role=replica).
+-- ============================================================================
+
+insert into public.ai_models(
+  provider, model_id, display_name, description,
+  context_window, input_price_per_million_cents, output_price_per_million_cents,
+  supports_tools, supports_vision, supports_embedding,
+  is_default_for_provider, source, metadata
+) values
+  ('openai_compat', 'Hermes-fallbacks',
+   'Hermes-fallbacks (9router)',
+   'Roteado pelo gateway Hermes com fallback automático entre provedores upstream.',
+   200000, 0, 0,
+   true, false, false,
+   true, 'manual',
+   '{"gateway":"9router","path":"hermes-8642","tier":"primary"}'::jsonb),
+  ('openai_compat', 'nvidia/minimaxai/minimax-m3',
+   'MiniMax M3 (NVIDIA build)',
+   'M3 hospedado em build NVIDIA — sem revisão mensal de preço.',
+   200000, 0, 0,
+   true, false, false,
+   false, 'manual',
+   '{"gateway":"9router","tier":"fallback"}'::jsonb),
+  ('openai_compat', 'gemini/gemini-3.1-pro-preview',
+   'Gemini 3.1 Pro Preview (9router)',
+   'Preview Gemini 3.1 Pro via 9router — pode mudar comportamento sem aviso.',
+   1000000, 0, 0,
+   true, true, false,
+   false, 'manual',
+   '{"gateway":"9router","tier":"experimental"}'::jsonb),
+  ('openai_compat', 'cerebras/llama-3.3-70b',
+   'Llama 3.3 70B (Cerebras)',
+   'Inferência rápida em Llama 70B no hardware Cerebras.',
+   128000, 0, 0,
+   true, false, false,
+   false, 'manual',
+   '{"gateway":"9router","tier":"fast_infer"}'::jsonb)
+on conflict (provider, model_id) do update set
+  display_name = excluded.display_name,
+  description = excluded.description,
+  context_window = excluded.context_window,
+  supports_tools = excluded.supports_tools,
+  supports_vision = excluded.supports_vision,
+  is_default_for_provider = excluded.is_default_for_provider,
+  metadata = excluded.metadata,
+  synced_at = now();
+
+-- Backfill idempotente: copia base_url do binding ativo pra credencial que ficou
+-- NULL entre a 0231 (criou a coluna) e o cadastro da credencial 9router-prod
+-- (cadastrada ANTES da 0231 não teve a base_url gravada pelo validator).
+update public.ai_provider_credentials c
+   set base_url = b.base_url
+  from public.ai_purpose_bindings b
+ where c.provider = 'openai_compat'
+   and c.base_url is null
+   and b.credential_id = c.id
+   and b.base_url is not null;
+
+-- Repointing idempotente do agente `Atendimento Inicial` da org `dr-matheus-dore`:
+-- a versão publicada 6955c3e2 ficou apontando pra sessão arquivada 881084e0
+-- (o agent_engine exige sessão viva pra rotear). Aponta pra sessão WORKING
+-- 804a1f0b. WHERE restringe por id de versão E id de sessão de origem
+-- arquivada — não varre outros tenants nem confunde se houver nova migração
+-- de repointing adiante.
+--
+-- Imutabilidade da versão publicada: a trigger
+-- `trg_ai_agent_versions_content_immutable` (BEFORE UPDATE, invoker) recusa
+-- QUALQUER mudança de `channel_session_id` em `status='published'`. A regra
+-- de negócio diz "publicada é imutável, mudança = nova versão draft + publish".
+-- Aqui a exceção é cirúrgica e documentada: o repointing é forward-fix de
+-- ponteiro órfão, não alteração de comportamento do agente (system_prompt,
+-- model, tools, trigger_config — tudo intacto). A forma é bypassar a trigger
+-- pelo seu próprio desenho: ela é BEFORE UPDATE padrão (sem `ENABLE ALWAYS`
+-- nem `ENABLE REPLICA`), e o Postgres pula triggers de UPDATE quando a sessão
+-- roda com `session_replication_role='replica'`. É o mesmo mecanismo que
+-- pg_dump e o replication slot usam — não é superusuário nem `disable trigger`
+-- (que exigiria `ALTER TABLE` e ficaria gravado como DDL no migration log).
+-- O SET LOCAL só vale dentro da transação da migration — sai do escopo
+-- automaticamente no COMMIT.
+begin;
+  set local session_replication_role = replica;
+
+  update public.ai_agent_versions av
+     set channel_session_id = '804a1f0b-73e0-4a93-b8eb-91432850306f'
+   where av.id = '6955c3e2-d5dc-4056-a654-4871ff94b495'
+     and av.channel_session_id = '881084e0-89be-4757-a10b-6f824f1cb67f'
+     and av.channel_session_id in (
+       select id from public.channel_sessions
+        where archived_at is not null
+          and organization_id = 'e9758c0af7fe4890af2b19bd2cf064fb'
+     );
+commit;

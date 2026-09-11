@@ -36,6 +36,17 @@ const createSchema = z.object({
   provider: z.enum(IDS_DE_PROVEDOR),
   label: z.string().trim().min(1).max(80),
   api_key: z.string().trim().min(8).max(2048),
+  // Endpoint do gateway OpenAI-compat. Obrigatório só quando provider ===
+  // "openai_compat"; pros 4 canônicos fica null/ausente. Validado em Zod em
+  // vez de SQL pra dar mensagem honesta em português (o banco só aceita text,
+  // qualquer string seria gravada).
+  base_url: z
+    .string()
+    .trim()
+    .max(2048)
+    .url("Base URL precisa começar com http:// ou https://.")
+    .nullable()
+    .optional(),
 });
 
 export async function GET(): Promise<Response> {
@@ -88,6 +99,18 @@ export async function POST(req: NextRequest): Promise<Response> {
   // `lib/ai/credenciais/guardar.ts` porque o wizard precisa exatamente do mesmo
   // e cada item dessa lista tem consequência de segurança se as duas cópias
   // divergirem. Aqui ficam auth, formato do erro e o `requestId`.
+  // openai_compat sem base_url é uso quebrado — recusa aqui pra não gravar
+  // credencial que o validator e o runtime vão recusar depois com mensagem
+  // pior (e o operador pode nem entender de onde veio).
+  if (provider === "openai_compat" && !input.base_url) {
+    return fail(
+      "validation_failed",
+      t("Para o provedor OpenAI-compatível informe a Base URL do gateway."),
+      422,
+      { requestId, details: { base_url: ["obrigatório para openai_compat"] } },
+    );
+  }
+
   const guardado = await guardarCredencial({
     admin: createAdminClient(),
     orgId: activeOrg.orgId,
@@ -95,6 +118,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     provider,
     label: input.label,
     apiKey: input.api_key,
+    baseUrl: input.base_url ?? null,
     requestId,
   });
 

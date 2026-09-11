@@ -142,6 +142,38 @@ export async function validateGoogleKey(apiKey: string): Promise<ValidationResul
  * provou ser válida: seria trocar um erro de credencial por um de
  * disponibilidade.
  */
+export async function validateOpenAICompatKey(
+  baseUrl: string,
+  apiKey: string,
+): Promise<ValidationResult> {
+  // Ping do gateway: {baseUrl}/models. Mesma forma que o seam chama em runtime
+  // — se o endpoint não responder como OpenAI (200 + `{data: [...]}`), a chave
+  // não vai funcionar quando o agente virar, e o operador precisa ver isso
+  // AGORA, no cadastro da credencial, não no primeiro turno.
+  //
+  // Base URL é OBRIGATÓRIO (já garantido pelo caller em validateProviderKey),
+  // então a normalização é só pra evitar barra duplicada na concatenação.
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  const url = `${trimmed}/models`;
+  try {
+    const res = await timedFetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, error: "auth_failed_401" };
+    }
+    if (!res.ok) {
+      return { ok: false, error: `provider_status_${res.status}` };
+    }
+    const json = (await res.json()) as { data?: { id?: string }[] };
+    const models = (json.data ?? []).map((m) => m.id ?? "").filter(Boolean);
+    return { ok: true, models };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.name : "network_error" };
+  }
+}
+
 export async function validateOpenRouterKey(apiKey: string): Promise<ValidationResult> {
   try {
     const auth = await timedFetch("https://openrouter.ai/api/v1/key", {
@@ -172,6 +204,7 @@ export async function validateOpenRouterKey(apiKey: string): Promise<ValidationR
 export function validateProviderKey(
   provider: Provider,
   apiKey: string,
+  baseUrl?: string,
 ): Promise<ValidationResult> {
   switch (provider) {
     case "anthropic":
@@ -182,6 +215,14 @@ export function validateProviderKey(
       return validateGoogleKey(apiKey);
     case "openrouter":
       return validateOpenRouterKey(apiKey);
+    case "openai_compat":
+      // Sem baseUrl o ping é inútil e a chamada real depois quebra com
+      // "openai_compat exige base_url". Devolve erro específico em vez de
+      // cair no default "unknown_provider".
+      if (!baseUrl || !baseUrl.trim()) {
+        return Promise.resolve({ ok: false, error: "base_url_required" });
+      }
+      return validateOpenAICompatKey(baseUrl, apiKey);
     default: {
       // Sem `never` aqui: `Provider` agora é derivado de PROVEDORES, e a lista
       // cresce sem que este arquivo saiba. Provedor novo cadastrado antes de
