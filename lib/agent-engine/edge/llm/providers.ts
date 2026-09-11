@@ -132,10 +132,32 @@ export function createDefaultRegistry(opts?: { allowedHosts?: string[] }): Provi
           "openai_compat requer baseUrl (gateway OpenAI-compat sem endpoint não tem pra onde chamar)",
         );
       }
+      // 9router (e alguns gateways OpenAI-compat) respondem a /chat/completions
+      // com `stream:true` quebrado: emite `data: [DONE]\n\n` duas vezes, com
+      // blank lines entre chunks que o EventSourceParserStream do AI SDK não
+      // tolera. Sintoma: HTTP 200 + `Invalid JSON response` no worker.
+      //
+      // O `fetch` injetado FORÇA `stream:false` no body antes do request sair:
+      // a resposta volta como JSON único, sem SSE, e o AI SDK processa
+      // normalmente. Sem header hop-by-hop novo (o `Accept` original é
+      // preservado), só mexe no corpo.
+      const wrappedFetch: typeof fetch = async (input, init) => {
+        if (init?.body && typeof init.body === "string") {
+          try {
+            const body = JSON.parse(init.body) as Record<string, unknown>;
+            if (body.stream === true) body.stream = false;
+            init = { ...init, body: JSON.stringify(body) };
+          } catch {
+            // body não é JSON — deixa passar (o SDK mandou algo estranho,
+            // não é nosso caso)
+          }
+        }
+        return contain(baseUrl)(input, init);
+      };
       return createOpenAI({
         apiKey,
         baseURL: baseUrl,
-        fetch: contain(baseUrl),
+        fetch: wrappedFetch,
       }).chat(modelId);
     },
   };
