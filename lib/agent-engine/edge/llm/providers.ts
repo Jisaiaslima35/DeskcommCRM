@@ -112,6 +112,32 @@ export function createDefaultRegistry(opts?: { allowedHosts?: string[] }): Provi
         fetch: contain(endpoint),
       })(modelId);
     },
+    /**
+     * Gateway OpenAI-compat genérico (9Router, LiteLLM, vLLM, Ollama-com-servidor,
+     * proxy corporativo). Diferente do openrouter acima em dois pontos:
+     *
+     *  - `baseUrl` é OBRIGATÓRIO: sem endpoint o agente não tem pra onde mandar
+     *    a chamada. A tela (AddCredentialDialog) já bloqueia o submit sem ele
+     *    quando o provedor é `openai_compat`, e o validator (`provider-validators`)
+     *    rejeita a credencial sem `base_url`. Aqui a gente reforça — passar sem
+     *    é erro de programador, não do operador.
+     *  - Sem headers de atribuição: este NÃO é o site openrouter.ai, então os
+     *    cabeçalhos HTTP-Referer/X-Title não se aplicam (e enviá-los para um
+     *    gateway que não os conhece vira lixo inofensivo, mas inofensivo ainda
+     *    é lixo).
+     */
+    openai_compat: (apiKey, modelId, baseUrl) => {
+      if (!baseUrl) {
+        throw new Error(
+          "openai_compat requer baseUrl (gateway OpenAI-compat sem endpoint não tem pra onde chamar)",
+        );
+      }
+      return createOpenAI({
+        apiKey,
+        baseURL: baseUrl,
+        fetch: contain(baseUrl),
+      })(modelId);
+    },
   };
 }
 
