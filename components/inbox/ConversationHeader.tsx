@@ -12,6 +12,7 @@ import { useReleaseConversation } from "@/hooks/inbox/useReleaseConversation";
 import { useCloseConversation, useReopenConversation } from "@/hooks/inbox/useCloseConversation";
 import { useResumeAiAttendance } from "@/hooks/inbox/useResumeAiAttendance";
 import { usePauseAiAttendance } from "@/hooks/inbox/usePauseAiAttendance";
+import { useResetConversation } from "@/hooks/inbox/useResetConversation";
 import { useAutomaticoAtivo } from "@/hooks/ai/useAutomaticoAtivo";
 import { OwnerBadge } from "@/components/kanban/OwnerBadge";
 import { comandoDaConversa, ROTULO_DO_MOTIVO } from "@/lib/inbox/comando-da-conversa";
@@ -60,6 +61,7 @@ export function ConversationHeader({ conversation }: Props) {
   const reopen = useReopenConversation();
   const retomar = useResumeAiAttendance();
   const pausar = usePauseAiAttendance();
+  const resetar = useResetConversation();
   // "Existe automático nesta org?" — sem isto o selo afirmava que o robô estava
   // atendendo em instalação que nunca configurou agente nenhum.
   const automaticoDaOrg = useAutomaticoAtivo();
@@ -94,6 +96,16 @@ export function ConversationHeader({ conversation }: Props) {
   });
 
   const encerrada = status === "closed" || status === "archived" || status === "resolved";
+  /**
+   * RESET só aparece em conversa 1:1 ABERTA.
+   *
+   * Bloqueios espelham os da rota: conversa encerrada não tem agente pra
+   * recomeçar, e conversa de grupo tem histórico compartilhado entre membros
+   * — arquivar uma isola só o agente, e os humanos continuariam lendo o
+   * histórico antigo enquanto o agente responde como se fosse primeira msg.
+   * É a única forma de confundir sem ganhar nada.
+   */
+  const podeResetar = !encerrada && !conversation.is_group;
   /**
    * A VOLTA aparece sempre que há algo a devolver — inclusive em conversa
    * ENCERRADA. Antes ela era condicionada a `status !== "closed"`, e o resultado
@@ -302,6 +314,36 @@ export function ConversationHeader({ conversation }: Props) {
             }}
           >
             {t("Fechar")}
+          </Button>
+        )}
+        {/* RESET: arquiva a conversa (soft delete) pra próxima msg do WhatsApp
+            abrir conversa NOVA já com a versão publicada do agente atual. É
+            como Isaías itera prompt sem contaminar teste com histórico.
+            Pede CONFIRMAÇÃO explícita: o efeito é invisível (a conversa
+            some da inbox), e um clique errado zera a janela de teste sem
+            aviso. Bloqueado em grupo e em conversa encerrada (mesma guarda
+            da rota). Não toca em mensagens/contatos/RAG — só isola a
+            conversa ativa. Audit: conversation.reset_for_testing. */}
+        {podeResetar && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={resetar.isPending}
+            data-testid="resetar-conversa"
+            title={t("Arquiva esta conversa. A próxima mensagem deste contato abre uma conversa nova, com o histórico zerado e o prompt atual do agente.")}
+            onClick={() => {
+              if (
+                confirm(
+                  t(
+                    "Resetar esta conversa?\n\nA conversa atual será arquivada. A próxima mensagem deste contato abre uma conversa NOVA, com histórico zerado e o prompt atual do agente.\n\nAs mensagens antigas continuam salvas — só esta janela de teste é que zera.",
+                  ),
+                )
+              ) {
+                resetar.mutate({ conversation_id: conversation.id });
+              }
+            }}
+          >
+            {resetar.isPending ? t("Resetando...") : t("Resetar conversa")}
           </Button>
         )}
         {encerrada && <Button size="sm" variant="outline" disabled={reopen.isPending}

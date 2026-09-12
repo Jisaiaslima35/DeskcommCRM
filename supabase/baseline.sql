@@ -23504,3 +23504,14 @@ begin;
           and organization_id = 'e9758c0af7fe4890af2b19bd2cf064fb'
      );
 commit;
+
+-- ---- conversations.archived_at (migration 0234) ----
+-- Coluna + índice parcial pra distinguir "nunca arquivada" (NULL) de "agora
+-- arquivada" (timestamp). Apêndice idempotente: o `update.sh` re-aplica sem
+-- erro mesmo em banco já migrado.
+alter table public.conversations
+  add column if not exists archived_at timestamp with time zone;
+
+create index if not exists idx_conversations_org_archived_at
+  on public.conversations (organization_id, archived_at desc)
+  where status = 'archived';

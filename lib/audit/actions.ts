@@ -92,6 +92,14 @@ export const AUDIT_ACTIONS = [
   // automático numa conversa não tinha rota e, portanto, não tinha ação de
   // auditoria. Desligar uma automação é decisão auditável tanto quanto religá-la.
   "conversation.ai_paused",
+  // Reset da janela de teste (migration 0234 + endpoint
+  // `app/api/v1/conversations/[id]/reset`): arquiva a conversa pra próxima
+  // msg do WhatsApp abrir conversa NOVA já com a versão publicada do agente
+  // atual. Auditável porque é gesto de operador que zera histórico visível
+  // — não confundir com fechamento (`conversation.closed`), que é transição
+  // de ciclo de vida. Reset não roda `fn_service_status` nem toca
+  // `service_revision`.
+  "conversation.reset_for_testing",
   "conversation.tags_changed",
   "contact.tags_changed",
   // Fila de confirmação (spec 17 §4b): a IA PROPÕE, uma pessoa decide. As três
